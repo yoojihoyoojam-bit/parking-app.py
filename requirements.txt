@@ -1,7 +1,4 @@
 streamlit
 pandas
-folium
-streamlit-folium
-geopy
-plotly
-openpyxl
+pydeck
+chardet
