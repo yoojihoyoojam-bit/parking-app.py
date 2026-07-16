@@ -1,5 +1,5 @@
 streamlit
 pandas
-pydeck
 chardet
-geopy
+folium
+streamlit-folium
