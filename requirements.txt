@@ -1,4 +1,11 @@
 streamlit
+
 pandas
-pydeck
-chardet
+
+folium
+
+streamlit-folium
+
+geopy
+
+plotly
