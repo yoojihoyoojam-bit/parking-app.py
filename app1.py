@@ -6,19 +6,14 @@ import io
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
 
-# 페이지 기본 설정
-st.set_page_config(
-    page_title="서울시 공영주차장 스마트 안내",
-    page_icon="🅿️",
-    layout="wide"
-)
+# 1. 페이지 설정
+st.set_page_config(page_title="서울시 공영주차장 스마트 안내", page_icon="🅿️", layout="wide")
 
 # ---------------------------------------------------------
-# 데이터 로드 및 강력 정제 함수
+# 2. 데이터 로드 및 초강력 전처리 (KeyError 방지)
 # ---------------------------------------------------------
 @st.cache_data
 def load_and_clean_data(file):
-    # 1. 바이너리 데이터 읽기
     if hasattr(file, 'getvalue'):
         raw_bytes = file.getvalue()
     elif isinstance(file, str):
@@ -27,7 +22,7 @@ def load_and_clean_data(file):
     else:
         raw_bytes = file.read()
 
-    # 2. 인코딩 감지 및 읽기
+    # 인코딩 감지
     detected = chardet.detect(raw_bytes)
     enc = detected.get('encoding') if detected.get('encoding') else 'utf-8-sig'
 
@@ -36,28 +31,28 @@ def load_and_clean_data(file):
     except Exception:
         df = pd.read_csv(io.BytesIO(raw_bytes), encoding='cp949', quotechar='"')
 
-    # 3. 핵심: 컬럼명의 따옴표 및 공백 완전 제거 ("기본 주차 요금" -> 기본 주차 요금)
+    # 컬럼명의 따옴표 및 공백 완벽 제거 ("위도" -> 위도)
     df.columns = df.columns.astype(str).str.replace('"', '').str.strip()
 
-    # 4. 각 셀 내부 데이터의 따옴표 제거
+    # 셀 내부 따옴표 제거
     for col in df.select_dtypes(include=['object']).columns:
         df[col] = df[col].astype(str).str.replace('"', '').str.strip()
 
-    # 5. 수치 데이터 처리
+    # 수치형 컬럼 강제 생성 및 예외 처리 (KeyError 방지 핵심)
     num_cols = ['위도', '경도', '기본 주차 요금', '기본 주차 시간(분 단위)', '월 정기권 금액']
     for col in num_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
         else:
-            df[col] = 0
+            df[col] = 0.0
 
-    # 6. 자치구 추출 (주소 첫 단어)
+    # 자치구 추출 (주소 첫 단어)
     if '주소' in df.columns:
         df['자치구'] = df['주소'].apply(lambda x: str(x).split()[0] if len(str(x).split()) > 0 else "기타")
     else:
         df['자치구'] = "기타"
 
-    # 7. 마커 툴팁용 요금 정보 생성
+    # 요금 텍스트 가공
     def format_fee(r):
         fee = r.get('기본 주차 요금', 0)
         time_m = r.get('기본 주차 시간(분 단위)', 0)
@@ -67,7 +62,7 @@ def load_and_clean_data(file):
 
     df['요금정보'] = df.apply(format_fee, axis=1)
 
-    # 문자열 누락 처리
+    # 누락된 텍스트 컬럼 안전 처리
     for col in ['주차장명', '주소', '토요일 유,무료 구분명', '공휴일 유,무료 구분명', '전화번호']:
         if col not in df.columns:
             df[col] = '정보없음'
@@ -77,25 +72,24 @@ def load_and_clean_data(file):
     return df
 
 # ---------------------------------------------------------
-# 보완 기능: 좌표(위도/경도)가 빈값일 경우 주소로 좌표 자동 보충
+# 3. 비어있는 위도/경도를 주소 기반으로 자동 변환 (지오코딩)
 # ---------------------------------------------------------
 @st.cache_data
-def geocode_missing_coords(df):
-    # 위도/경도가 0인 항목 추출
-    missing_mask = (df['위도'] == 0) | (df['경도'] == 0)
+def fill_missing_coordinates(df):
+    # 위도/경도가 0이거나 서울 지역을 벗어난 경우 좌표 변환 대상
+    missing_mask = (df['위도'] < 33) | (df['경도'] < 124)
     if not missing_mask.any():
         return df
 
-    geolocator = Nominatim(user_agent="seoul_parking_app_v2")
-    geocode = RateLimiter(geolocator.geocode, min_delay_seconds=0.1)
+    geolocator = Nominatim(user_agent="seoul_parking_app_v3")
+    geocode = RateLimiter(geolocator.geocode, min_delay_seconds=0.05)
 
-    # 상위 50개 항목에 대해서만 실시간 지오코딩 (속도 최적화)
-    targets = df[missing_mask].head(50)
+    # 상위 60개 항목 좌표 변환 (속도 방어)
+    targets = df[missing_mask].head(60)
     for idx, row in targets.iterrows():
         addr = row.get('주소', '')
         if addr and addr != '정보없음':
             try:
-                # '서울시' 키워드 추가하여 정확도 향상
                 location = geocode(f"서울 {addr}")
                 if location:
                     df.at[idx, '위도'] = location.latitude
@@ -105,31 +99,29 @@ def geocode_missing_coords(df):
     return df
 
 # ---------------------------------------------------------
-# 사이드바: 데이터 업로드
+# 4. 사이드바 - 파일 업로드 & 필터링
 # ---------------------------------------------------------
-st.sidebar.title("⚙️ 설정 및 CSV 업로드")
-
-uploaded_file = st.sidebar.file_uploader("서울시 공영주차장 CSV 업로드", type=["csv"])
+st.sidebar.title("⚙️ 설정 및 파일 업로드")
+uploaded_file = st.sidebar.file_uploader("CSV 파일을 업로드하세요", type=["csv"])
 
 if uploaded_file is not None:
     data = load_and_clean_data(uploaded_file)
 else:
     try:
         data = load_and_clean_data("서울시 공영주차장 안내 정보.csv")
-        st.sidebar.info("기본 파일(서울시 공영주차장 안내 정보.csv)을 로드했습니다.")
+        st.sidebar.info("기본 파일(서울시 공영주차장 안내 정보.csv)을 읽었습니다.")
     except Exception:
         st.sidebar.warning("왼쪽 사이드바에서 CSV 파일을 업로드해주세요.")
         st.stop()
 
-# 좌표 보충 실행
-data = geocode_missing_coords(data)
+# 좌표가 없으면 주소 기반으로 지오코딩 실행
+data = fill_missing_coordinates(data)
 
-# 자치구 및 필터 설정
+# 필터 옵션
 gu_list = ["전체"] + sorted([g for g in data['자치구'].unique() if g != '기타'])
 selected_gu = st.sidebar.selectbox("자치구 선택", gu_list)
-free_weekend = st.sidebar.checkbox("주말(토/공휴일) 무료 개방 주차장만 보기")
+free_weekend = st.sidebar.checkbox("주말(토/공휴일) 무료 주차장만 보기")
 
-# 데이터 필터링
 filtered_df = data.copy()
 
 if selected_gu != "전체":
@@ -141,15 +133,14 @@ if free_weekend:
         (filtered_df['공휴일 유,무료 구분명'] == '무료')
     ]
 
-# 지도 표기를 위한 유효 좌표 필터링
+# 정상 좌표만 지도로 전송
 map_df = filtered_df[(filtered_df['위도'] > 33) & (filtered_df['경도'] > 124)].copy()
 
 # ---------------------------------------------------------
-# 메인 화면 UI
+# 5. 메인 UI
 # ---------------------------------------------------------
 st.title("🅿️ 서울시 공영주차장 스마트 안내 시스템")
 
-# 상단 카드
 col1, col2, col3 = st.columns(3)
 with col1:
     st.metric(label="조회된 주차장", value=f"{len(filtered_df):,} 개")
@@ -173,7 +164,7 @@ with col3:
 st.markdown("---")
 
 # ---------------------------------------------------------
-# 지도 시각화
+# 6. 지도 시각화 (Pydeck)
 # ---------------------------------------------------------
 st.subheader("🗺️ 주차장 위치 지도")
 
@@ -225,12 +216,12 @@ if not map_df.empty:
     )
     st.pydeck_chart(r)
 else:
-    st.warning("선택된 주차장 중 지도 표시용 좌표(위도/경도)를 찾을 수 없습니다. 아래 표에서 전체 주차장 목록을 확인해주세요.")
+    st.warning("선택된 주차장의 위도/경도를 찾는 중입니다. 잠시만 기다리시거나 아래 표 목록에서 확인하세요.")
 
 st.markdown("---")
 
 # ---------------------------------------------------------
-# 상세 데이터 표 및 검색
+# 7. 주차장 상세 목록 테이블 및 검색
 # ---------------------------------------------------------
 st.subheader("📋 주차장 상세 목록 및 검색")
 
@@ -253,5 +244,3 @@ st.dataframe(
     use_container_width=True,
     hide_index=True
 )
-
-
