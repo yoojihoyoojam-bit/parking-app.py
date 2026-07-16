@@ -1,194 +1,158 @@
 import streamlit as st
 import pandas as pd
 import pydeck as pdk
-import io
 import chardet
+import io
 
-# 페이지 기본 설정
-st.set_page_config(
-    page_title="서울시 공영주차장 정보 안내",
-    page_icon="🅿️",
-    layout="wide"
-)
+# 1. 페이지 설정
+st.set_page_config(page_title="서울시 공영주차장 안내", page_icon="🅿️", layout="wide")
 
 # ---------------------------------------------------------
-# CSV 파일 안전하게 읽기 (따옴표 및 인코딩 완전 처리)
+# 2. 데이터 로드 및 초강력 정제 함수
 # ---------------------------------------------------------
 @st.cache_data
-def load_data(file):
-    # 1. 파일 바이트 읽기
-    if hasattr(file, 'getvalue'):
-        raw_data = file.getvalue()
-    elif isinstance(file, str):
-        with open(file, 'rb') as f:
-            raw_data = f.read()
-    else:
-        raw_data = file.read()
-
-    # 인코딩 감지
-    detected = chardet.detect(raw_data)
-    detected_enc = detected.get('encoding')
-
-    encodings_to_try = [detected_enc, 'utf-8-sig', 'cp949', 'euc-kr', 'utf-8']
+def load_and_clean_data(file):
+    # 가. 인코딩 감지 및 읽기
+    raw_bytes = file.read()
+    detected = chardet.detect(raw_bytes)
+    encoding = detected['encoding'] if detected['encoding'] else 'utf-8'
     
-    df = None
-    for enc in encodings_to_try:
-        if not enc:
-            continue
-        try:
-            # engine='python' 및 on_bad_lines 옵션으로 파싱 에러 방지
-            df = pd.read_csv(
-                io.BytesIO(raw_data), 
-                encoding=enc, 
-                engine='python', 
-                on_bad_lines='skip'
-            )
-            if len(df.columns) > 1: # 정상 파싱 체크
-                break
-        except Exception:
-            continue
+    # 나. 데이터 읽기 (따옴표 처리)
+    try:
+        df = pd.read_csv(io.BytesIO(raw_bytes), encoding=encoding, quotechar='"')
+    except:
+        df = pd.read_csv(io.BytesIO(raw_bytes), encoding='cp949', quotechar='"')
 
-    if df is None or len(df.columns) <= 1:
-        # C엔진으로 다시 시도
-        for enc in ['utf-8-sig', 'cp949', 'euc-kr', 'utf-8']:
-            try:
-                df = pd.read_csv(io.BytesIO(raw_data), encoding=enc)
-                if len(df.columns) > 1:
-                    break
-            except Exception:
-                continue
-
-    # 컬럼명 앞뒤 따옴표 및 공백 제거
+    # 다. 컬럼명 정제 (따옴표 및 공백 제거)
     df.columns = df.columns.str.replace('"', '').str.strip()
+    
+    # 라. 모든 데이터 내의 따옴표 제거 (데이터가 ""마장동"" 처럼 된 경우 대비)
+    df = df.apply(lambda x: x.str.replace('"', '').str.strip() if x.dtype == "object" else x)
 
-    # 모든 셀 데이터의 앞뒤 따옴표 및 공백 제거
-    for col in df.select_dtypes(include=['object']).columns:
-        df[col] = df[col].astype(str).str.replace('"', '').str.strip()
-
-    # 수치형 컬럼 변환
-    numeric_cols = [
-        '위도', '경도', '기본 주차 요금', '기본 주차 시간(분 단위)', 
-        '추가 단위 요금', '추가 단위 시간(분 단위)', '월 정기권 금액'
-    ]
-    for col in numeric_cols:
+    # 마. 숫자형 변환 (위도, 경도, 요금 등)
+    num_cols = ['위도', '경도', '기본 주차 요금', '기본 주차 시간(분 단위)', '월 정기권 금액']
+    for col in num_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-        else:
-            df[col] = 0
-
-    # 자치구 추출 (주소 예: "강북구 미아동 791-1364" -> "강북구")
+    
+    # 바. 자치구 추출 (주소의 첫 단어)
     if '주소' in df.columns:
-        def extract_gu(addr):
-            parts = str(addr).split()
-            for p in parts:
-                if p.endswith(('구', '군', '시')):
-                    return p
-            return '기타'
-        df['자치구'] = df['주소'].apply(extract_gu)
+        df['자치구'] = df['주소'].apply(lambda x: str(x).split()[0] if len(str(x).split()) > 0 else "기타")
     else:
-        df['자치구'] = '기타'
+        df['자치구'] = "미분류"
 
-    # 요금 정보 텍스트 가공
-    def make_fee_info(r):
-        fee = r.get('기본 주차 요금', 0)
-        time_min = r.get('기본 주차 시간(분 단위)', 0)
-        if fee > 0:
-            return f"기본 {int(time_min)}분 / {int(fee):,}원"
-        return "무료 또는 정보 없음"
-
-    df['요금정보'] = df.apply(make_fee_info, axis=1)
-
-    # 누락 데이터 안전 처리
-    for col in ['주차장명', '주소', '토요일 유,무료 구분명', '공휴일 유,무료 구분명', '전화번호']:
-        if col not in df.columns:
-            df[col] = '정보없음'
-        else:
-            df[col] = df[col].replace({'nan': '정보없음', 'None': '정보없음', '': '정보없음'}).fillna('정보없음')
-
+    # 사. 툴팁용 요금 정보 생성
+    df['요금표시'] = df.apply(lambda x: f"{int(x['기본 주차 요금'])}원/{int(x['기본 주차 시간(분 단위)'])}분" 
+                            if x['기본 주차 요금'] > 0 else "무료/정보없음", axis=1)
+    
     return df
 
 # ---------------------------------------------------------
-# 사이드바: 데이터 업로드 및 필터
+# 3. 사이드바 - 파일 업로드 및 필터
 # ---------------------------------------------------------
-st.sidebar.title("⚙️ 설정 및 파일 업로드")
+st.sidebar.title("🅿️ 데이터 설정")
+uploaded_file = st.sidebar.file_uploader("주차장 CSV 파일을 업로드하세요", type=['csv'])
 
-uploaded_file = st.sidebar.file_uploader("CSV 파일 업로드", type=["csv"])
-
-if uploaded_file is not None:
-    data = load_data(uploaded_file)
+if uploaded_file:
+    df = load_and_clean_data(uploaded_file)
 else:
-    try:
-        data = load_data("서울시 공영주차장 안내 정보.csv")
-        st.sidebar.info("기본 CSV 파일을 로드했습니다.")
-    except Exception as e:
-        st.sidebar.warning("CSV 파일을 사이드바에서 업로드해주세요.")
-        st.stop()
+    st.info("왼쪽 사이드바에서 CSV 파일을 업로드해주세요. (제공해주신 데이터를 넣으시면 됩니다)")
+    st.stop()
 
-gu_list = ["전체"] + sorted([g for g in data['자치구'].unique() if g != '기타'])
+# 자치구 필터
+gu_list = ["전체"] + sorted(list(df['자치구'].unique()))
 selected_gu = st.sidebar.selectbox("자치구 선택", gu_list)
 
-free_weekend = st.sidebar.checkbox("주말(토/공휴일) 무료 개방 주차장만 보기")
+# 운영 필터
+filter_free = st.sidebar.checkbox("주말(토요일) 무료만 보기")
 
-# 필터링
-filtered_df = data.copy()
-
+# 데이터 필터링 적용
+view_df = df.copy()
 if selected_gu != "전체":
-    filtered_df = filtered_df[filtered_df['자치구'] == selected_gu]
-
-if free_weekend:
-    filtered_df = filtered_df[
-        (filtered_df['토요일 유,무료 구분명'] == '무료') | 
-        (filtered_df['공휴일 유,무료 구분명'] == '무료')
-    ]
-
-# 위도, 경도 좌표가 유효한(서울 지역범위 33~39, 124~132) 데이터만 지도에 표기
-map_df = filtered_df[
-    (filtered_df['위도'] > 30) & (filtered_df['위도'] < 45) &
-    (filtered_df['경도'] > 120) & (filtered_df['경도'] < 135)
-].copy()
+    view_df = view_df[view_df['자치구'] == selected_gu]
+if filter_free:
+    view_df = view_df[view_df['토요일 유,무료 구분명'] == '무료']
 
 # ---------------------------------------------------------
-# 메인 화면
+# 4. 메인 화면 - 요약 정보
 # ---------------------------------------------------------
-st.title("🅿️ 서울시 공영주차장 스마트 안내 시스템")
+st.title(f"🚗 {selected_gu if selected_gu != '전체' else '서울시'} 공영주차장 찾기")
 
-# 상단 요약 카드
 col1, col2, col3 = st.columns(3)
-
 with col1:
-    st.metric(label="조회된 주차장 수", value=f"{len(filtered_df):,} 개")
-
+    st.metric("검색된 주차장", f"{len(view_df)} 곳")
 with col2:
-    valid_paid = filtered_df[filtered_df['기본 주차 요금'] > 0]
-    if not valid_paid.empty:
-        avg_price = valid_paid['기본 주차 요금'].mean()
-        st.metric(label="평균 기본 요금", value=f"{int(avg_price):,} 원")
-    else:
-        st.metric(label="평균 기본 요금", value="0 원")
-
+    avg_fee = view_df[view_df['기본 주차 요금'] > 0]['기본 주차 요금'].mean()
+    st.metric("평균 기본요금", f"{int(avg_fee) if not pd.isna(avg_fee) else 0} 원")
 with col3:
-    if not filtered_df.empty:
-        cheapest = filtered_df.sort_values(by=['기본 주차 요금', '기본 주차 시간(분 단위)'], ascending=[True, False]).iloc[0]
-        fee_val = int(cheapest['기본 주차 요금'])
-        time_val = int(cheapest['기본 주차 시간(분 단위)'])
-        fee_text = f"{fee_val:,}원 ({time_val}분)" if fee_val > 0 else "무료"
-        st.metric(label="💡 최저가 주차장", value=cheapest['주차장명'], delta=fee_text)
-
-st.markdown("---")
+    # 가장 싼 주차장 찾기 (요금이 0보다 큰 것 중 최저가)
+    cheapest_df = view_df[view_df['기본 주차 요금'] > 0].sort_values('기본 주차 요금')
+    if not cheapest_df.empty:
+        cheapest = cheapest_df.iloc[0]
+        st.success(f"가장 싼 곳: {cheapest['주차장명']} ({int(cheapest['기본 주차 요금'])}원)")
 
 # ---------------------------------------------------------
-# 지도 시각화 (Pydeck)
+# 5. 지도 시각화 (Pydeck)
 # ---------------------------------------------------------
-st.subheader("🗺️ 주차장 위치 지도")
+st.subheader("📍 주차장 위치 (마우스를 올리면 상세정보가 보입니다)")
 
-if not map_df.empty:
-    center_lat = map_df['위도'].mean()
-    center_lon = map_df['경도'].mean()
+# 위도/경도가 0인 데이터 제거 (지도 오류 방지)
+map_data = view_df[(view_df['위도'] > 30) & (view_df['경도'] > 120)]
 
-    layer = pdk.
+if not map_data.empty:
+    # 지도 레이어
+    layer = pdk.Layer(
+        "ScatterplotLayer",
+        map_data,
+        get_position="[경도, 위도]",
+        get_fill_color="[255, 100, 0, 160]",
+        get_radius=100,
+        pickable=True,
+        auto_highlight=True,
+    )
 
-st.dataframe(
-    display_df[show_cols],
-    use_container_width=True,
-    hide_index=True
-)
+    # 중심점 계산
+    center_lat = map_data['위도'].mean()
+    center_lon = map_data['경도'].mean()
+
+    # 지도 출력
+    st.pydeck_chart(pdk.Deck(
+        map_style='mapbox://styles/mapbox/light-v9',
+        initial_view_state=pdk.ViewState(
+            latitude=center_lat,
+            longitude=center_lon,
+            zoom=12,
+            pitch=0
+        ),
+        layers=[layer],
+        tooltip={
+            "html": "<b>주차장명:</b> {주차장명}<br/>"
+                    "<b>주소:</b> {주소}<br/>"
+                    "<b>요금:</b> {요금표시}<br/>"
+                    "<b>토요일:</b> {토요일 유,무료 구분명}<br/>"
+                    "<b>공휴일:</b> {공휴일 유,무료 구분명}",
+            "style": {"color": "white", "backgroundColor": "black"}
+        }
+    ))
+else:
+    st.warning("지도에 표시할 위치 정보(위도, 경도)가 데이터에 없습니다.")
+
+# ---------------------------------------------------------
+# 6. 상세 데이터 표
+# ---------------------------------------------------------
+st.subheader("📋 주차장 상세 목록")
+
+# 필요한 컬럼만 보기 좋게 정리
+show_cols = ['주차장명', '주소', '요금표시', '토요일 유,무료 구분명', '공휴일 유,무료 구분명', '전화번호']
+st.dataframe(view_df[show_cols], use_container_width=True, hide_index=True)
+
+# ---------------------------------------------------------
+# 7. 추가 추천 기능: 월 정기권 분석
+# ---------------------------------------------------------
+if not view_df.empty:
+    st.markdown("---")
+    st.subheader("💡 분석 추천: 월 정기권이 저렴한 곳")
+    monthly_df = view_df[view_df['월 정기권 금액'] > 0].sort_values('월 정기권 금액').head(5)
+    if not monthly_df.empty:
+        st.write("해당 지역에서 월 정기권이 가장 저렴한 TOP 5입니다.")
+        st.table(monthly_df[['주차장명', '월 정기권 금액', '전화번호']])
