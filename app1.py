@@ -229,4 +229,4 @@ display_df = filtered_df.copy()
 if search_kw:
     display_df = display_df[
         display_df['주차장명'].str.contains(search_kw, case=False, na=False) | 
-        display_df['주소'].str.contains(search_kw, case
+        display_df['주소'].str.contains(search_kw, case)
