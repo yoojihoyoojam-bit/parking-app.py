@@ -5,15 +5,15 @@ import time
 st.set_page_config(page_title="광산 채굴 타이쿤", page_icon="⛏️", layout="centered")
 
 # --- Session State Initialization ---
-if "gold" not in st.state_dict:
+if "gold" not in st.session_state:
     st.session_state.gold = 0
-if "mined_ores" not in st.state_dict:
+if "mined_ores" not in st.session_state:
     st.session_state.mined_ores = 0
-if "pickaxe_level" not in st.state_dict:
+if "pickaxe_level" not in st.session_state:
     st.session_state.pickaxe_level = 1
-if "auto_miner_level" not in st.state_dict:
+if "auto_miner_level" not in st.session_state:
     st.session_state.auto_miner_level = 0
-if "last_time" not in st.state_dict:
+if "last_time" not in st.session_state:
     st.session_state.last_time = time.time()
 
 # --- Auto Mining Logic ---
