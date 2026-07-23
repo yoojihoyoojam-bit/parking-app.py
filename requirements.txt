@@ -1,5 +1,1 @@
-streamlit
-pandas
-chardet
-folium
-streamlit-folium
+streamlit>=1.45
